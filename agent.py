@@ -23,13 +23,14 @@ import os
 
 from dotenv import load_dotenv
 from groq import Groq
+from groq import BadRequestError
 
 from tools import create_fit_card, search_listings, suggest_outfit
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MODEL = "llama-3.3-70b-versatile"
+MODEL = os.getenv("MODEL")
 MAX_TOOL_ROUNDS = 10
 
 _client = Groq(api_key=GROQ_API_KEY)
@@ -98,7 +99,14 @@ TOOL_DEFINITIONS = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    # dummy optional parameter so the model has
+                    # a concrete field to serialize in the JSON
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Set to true to confirm the call."
+                    }
+                },
                 "required": [],
             },
         },
@@ -113,7 +121,12 @@ TOOL_DEFINITIONS = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Set to true to confirm the call."
+                    }
+                },
                 "required": [],
             },
         },
@@ -258,12 +271,21 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     ]
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOL_DEFINITIONS,
-            tool_choice="auto",
-        )
+        for attempt in range(3):
+            try:
+                response = client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                )
+                break
+            except BadRequestError as e:
+                # catches bad formatting returned by model
+                if e.status_code == 400 and attempt < 2:
+                    print("[WARNING] model returned a 400 error, retrying...")
+                    continue
+                raise
         assistant_message = response.choices[0].message
         print(f"> assistant message: {assistant_message}")
 
@@ -274,6 +296,12 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                 session["error"] = (
                     "Could not find a clothing item to search for in your query. "
                     "Please describe what you're looking for (e.g. 'vintage graphic tee under $30')."
+                )
+            # LLM finds that search results are unrelated to query
+            if session["search_results"] and not session["outfit_suggestion"]:
+                session["error"] = (
+                    "Could not find a clothing item to search for in your query. "
+                    "Please try searching for another listing (e.g. 'vintage graphic tee under $30')."
                 )
             return session
 
