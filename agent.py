@@ -18,7 +18,162 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+import os
+
+from dotenv import load_dotenv
+from groq import Groq
+
+from tools import create_fit_card, search_listings, suggest_outfit
+
+load_dotenv()
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MODEL = "llama-3.3-70b-versatile"
+MAX_TOOL_ROUNDS = 10
+
+_client = Groq(api_key=GROQ_API_KEY)
+
+
+# ── Groq client ───────────────────────────────────────────────────────────────
+
+def _get_client() -> Groq:
+    global _client
+    if not _client:
+        _client = Groq(api_key=GROQ_API_KEY)
+    return _client
+
+
+# ── Tool definitions ──────────────────────────────────────────────────────────
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_listings",
+            "description": (
+                "Search thrift listings for clothing items matching the user's request. "
+                "Always call this first. Extract a description, optional size, and optional "
+                "max_price from the user query. "
+                "If the results list is empty, call search_listings again with size and/or "
+                "max_price omitted — but stop after two attempts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Keywords describing the clothing item "
+                            "(e.g. 'vintage graphic tee', 'leather bomber jacket')."
+                        ),
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": (
+                            "Clothing size to filter by (e.g. 'S', 'M', 'L', 'XL'). "
+                            "Omit if the user did not specify a size."
+                        ),
+                    },
+                    "max_price": {
+                        "type": "number",
+                        "description": (
+                            "Maximum price in dollars, inclusive. "
+                            "Omit if the user did not specify a budget."
+                        ),
+                    },
+                },
+                "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_outfit",
+            "description": (
+                "Suggest 1–2 outfit combinations using the top listing from search_listings "
+                "and the user's wardrobe. Call this only after search_listings has returned "
+                "at least one result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_fit_card",
+            "description": (
+                "Generate a short, shareable social media caption for the outfit. "
+                "Call this only after suggest_outfit has returned an outfit suggestion."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+]
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = (
+    "You are FitFindr, a thrift shopping assistant. "
+    "For every user query, work through these steps in order using your tools:\n\n"
+    "1. Call search_listings to find matching clothing items. "
+    "   Parse the description, size, and max_price from the user's message.\n"
+    "   - If the results list is empty, call search_listings again with max_price "
+    "     or both size and max_price removed and note the relaxed constraints.\n"
+    "   - If results are still empty after the retry, stop — do not call any more tools.\n"
+    "2. Once you have at least one search result, call suggest_outfit.\n"
+    "3. Once you have an outfit suggestion, call create_fit_card.\n\n"
+    "Do not call suggest_outfit or create_fit_card before search_listings has "
+    "returned at least one result."
+)
+
+
+# ── Tool dispatch ─────────────────────────────────────────────────────────────
+
+def dispatch_tool(tool_name: str, tool_args: dict, session: dict) -> str:
+    """Route a tool call to the correct function, update the session, and return a JSON string."""
+    print(f"  → Tool call: {tool_name}({tool_args})")
+    if tool_name == "search_listings":
+        listings = search_listings(
+            description=tool_args.get("description", ""),
+            size=tool_args.get("size"),
+            max_price=tool_args.get("max_price"),
+        )
+        session["search_results"] = listings
+        session["selected_item"] = listings[0] if listings else None
+        result = {"results": listings}
+
+    elif tool_name == "suggest_outfit":
+        suggestion = suggest_outfit(
+            tool_args["selected_item"],
+            tool_args["wardrobe"]
+        )
+        session["outfit_suggestion"] = suggestion
+        result = {"suggestion": suggestion}
+
+    elif tool_name == "create_fit_card":
+        fit_card = create_fit_card(
+            tool_args["outfit_suggestion"],
+            tool_args["selected_item"]
+        )
+        session["fit_card"] = fit_card
+        result = {"fit_card": fit_card}
+
+    else:
+        result = {"error": f"Unknown tool: {tool_name}"}
+
+    print(f"  ← Result: {json.dumps(result)}")
+    return json.dumps(result)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +247,114 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: initialize session
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+    client = _get_client()
+    search_attempts = 0
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=TOOL_DEFINITIONS,
+            tool_choice="auto",
+        )
+        assistant_message = response.choices[0].message
+        print(f"> assistant message: {assistant_message}")
+
+        # LLM decided no more tools are needed — exit the loop
+        if not assistant_message.tool_calls:
+            # If the LLM exited without ever searching, the query was unparseable
+            if not session["search_results"] and not session["error"]:
+                session["error"] = (
+                    "Could not find a clothing item to search for in your query. "
+                    "Please describe what you're looking for (e.g. 'vintage graphic tee under $30')."
+                )
+            return session
+
+        messages.append(assistant_message)
+
+        for tool_call in assistant_message.tool_calls:
+            tool_name: str = tool_call.function.name
+            tool_args: dict = json.loads(tool_call.function.arguments)
+
+            if tool_name == "search_listings":
+                # Step 2: record what the LLM parsed from the query
+                session["parsed"] = {k: v for k, v in tool_args.items()}
+                search_attempts += 1
+                tool_result = dispatch_tool(tool_name, tool_args, session)
+                # Step 3 error: search returned nothing
+                if not session["search_results"]:
+                    if (search_attempts >= 3 or
+                        (not set(tool_args).intersection({"size", "max_price"}))):
+                        session["error"] = (
+                            "No listings found matching your request. "
+                            "Try a broader description or remove size and price constraints."
+                        )
+                        return session
+                    # First failure: tell the LLM to retry with relaxed constraints
+                    omitted = [k for k in ("size", "max_price") if k not in tool_args]
+                    tool_result = json.dumps({
+                        "results": [],
+                        "error": (
+                            "No listings matched."
+                            + (f" Already omitted: {', '.join(omitted)}." if omitted else "")
+                            + " Try calling search_listings again with"
+                            + " max_price or both size and max_price removed."
+                        ),
+                    })
+
+            elif tool_name == "suggest_outfit":
+                # Guard: cannot suggest an outfit without a selected item
+                if not session.get("selected_item"):
+                    tool_result = json.dumps(
+                        {"error": "No item selected yet. Call search_listings first."}
+                    )
+                else:
+                    tool_result = dispatch_tool(
+                        tool_name,
+                        {
+                            "selected_item": session["selected_item"],
+                            "wardrobe": session["wardrobe"]
+                        },
+                        session)
+
+            elif tool_name == "create_fit_card":
+                # Guard: cannot create a fit card without an outfit suggestion
+                if not session.get("outfit_suggestion"):
+                    tool_result = json.dumps(
+                        {"error": "No outfit suggestion yet. Call suggest_outfit first."}
+                    )
+                else:
+                    tool_result = dispatch_tool(
+                        tool_name,
+                        {
+                            "outfit_suggestion": session["outfit_suggestion"],
+                            "selected_item": session["selected_item"]
+                        },
+                        session
+                    )
+                    # Error path: create_fit_card signals incomplete outfit data
+                    fit = session.get("fit_card", "")
+                    if fit.startswith("Error:"):
+                        session["error"] = fit
+                        session["fit_card"] = None
+                        return session
+
+            else:
+                tool_result = dispatch_tool(tool_name, tool_args, session)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": tool_result,
+            })
+
     return session
 
 
