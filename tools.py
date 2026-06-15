@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,41 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+_STOP_WORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to",
+    "for", "of", "with", "by", "from", "is", "are", "was", "i", "im",
+    "looking", "want", "need", "some", "any", "under", "over", "around",
+    "size", "something", "that", "this", "me", "my",
+}
+
+_CATEGORY_SYNONYMS = {
+    "tops": {
+        "shirt", "tee", "t-shirt", "top", "blouse", "cardigan", "sweater",
+        "sweatshirt", "hoodie", "vest", "henley", "polo", "flannel", "crewneck",
+        "tank", "pullover", "jersey", "tunic", "knitwear",
+    },
+    "bottoms": {
+        "jeans", "pants", "trousers", "shorts", "skirt", "dress", "slip",
+        "cargo", "cords", "corduroy", "chinos", "slacks", "leggings", "culottes",
+    },
+    "outerwear": {
+        "jacket", "coat", "blazer", "bomber", "windbreaker", "shacket",
+        "parka", "anorak", "trench", "raincoat", "overcoat",
+    },
+    "shoes": {
+        "boots", "sneakers", "sandals", "heels", "loafers", "platforms",
+        "flats", "mules", "clogs", "pumps", "oxfords", "trainers",
+        "slippers", "wedges", "mary janes",
+    },
+    "accessories": {
+        "belt", "hat", "bag", "purse", "handbag", "scarf", "necklace",
+        "bracelet", "wallet", "sunglasses", "cap", "beanie", "tote",
+        "earrings", "clutch", "watch",
+    },
+}
+
+MODEL = os.getenv("MODEL")
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -80,22 +116,34 @@ def search_listings(
             continue
         filtered.append(listing)
 
-    # Score by keyword overlap across searchable text fields
-    keywords = [w.lower() for w in description.split() if w.strip()]
+    # Strip punctuation, drop stop words and very short words
+    raw = re.sub(r"[^\w\s]", " ", description.lower()).split()
+    keywords = [w for w in raw if len(w) >= 3 and w not in _STOP_WORDS]
 
     def score(listing: dict) -> int:
-        searchable = " ".join([
-            listing.get("title", ""),
-            listing.get("description", ""),
-            listing.get("category", ""),
-            " ".join(listing.get("style_tags", [])),
-            " ".join(listing.get("colors", [])),
-            listing.get("brand", "") or "",
-        ]).lower()
-        return sum(1 for kw in keywords if kw in searchable)
+        title    = listing.get("title", "").lower()
+        tags     = " ".join(listing.get("style_tags", [])).lower()
+        category = listing.get("category", "").lower()
+        colors   = " ".join(listing.get("colors", [])).lower()
+        brand    = (listing.get("brand", "") or "").lower()
+        desc     = listing.get("description", "").lower()
+
+        # Expand category with synonyms so "boots" matches category "shoes", etc.
+        category_expanded = category + " " + " ".join(_CATEGORY_SYNONYMS.get(category, set()))
+
+        total = 0
+        for kw in keywords:
+            pattern = r"\b" + re.escape(kw) + r"\b"
+            if re.search(pattern, title) or re.search(pattern, tags):
+                total += 3
+            elif re.search(pattern, brand) or re.search(pattern, category_expanded):
+                total += 2
+            elif re.search(pattern, colors) or re.search(pattern, desc):
+                total += 1
+        return total
 
     scored = [(listing, score(listing)) for listing in filtered]
-    scored = [(listing, s) for listing, s in scored if s > 0]
+    scored = [(listing, s) for listing, s in scored if s > 2]
     scored.sort(key=lambda x: x[1], reverse=True)
 
     return [listing for listing, _ in scored]
@@ -172,7 +220,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         )
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
     )
@@ -237,7 +285,7 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     )
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=1.2,
     )

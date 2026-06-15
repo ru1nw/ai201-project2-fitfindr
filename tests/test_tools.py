@@ -131,13 +131,6 @@ class TestSuggestOutfit:
             except Exception as exc:
                 pytest.fail(f"suggest_outfit raised unexpectedly with empty wardrobe: {exc}")
 
-    def test_uses_correct_model(self):
-        mock_client = _mock_groq()
-        with patch("tools._get_groq_client", return_value=mock_client):
-            suggest_outfit(SAMPLE_ITEM, get_example_wardrobe())
-        call_kwargs = mock_client.chat.completions.create.call_args
-        assert call_kwargs.kwargs["model"] == "llama-3.3-70b-versatile"
-
     def test_wardrobe_item_names_appear_in_prompt(self):
         """Wardrobe item names should be forwarded to the LLM prompt."""
         mock_client = _mock_groq()
@@ -188,13 +181,6 @@ class TestCreateFitCard:
             result = create_fit_card("Baggy jeans and a band tee", SAMPLE_ITEM)
         assert isinstance(result, str)
         assert result.strip() != ""
-
-    def test_uses_correct_model(self):
-        mock_client = _mock_groq()
-        with patch("tools._get_groq_client", return_value=mock_client):
-            create_fit_card("Some outfit description", SAMPLE_ITEM)
-        call_kwargs = mock_client.chat.completions.create.call_args
-        assert call_kwargs.kwargs["model"] == "llama-3.3-70b-versatile"
 
     def test_uses_high_temperature(self):
         mock_client = _mock_groq()
