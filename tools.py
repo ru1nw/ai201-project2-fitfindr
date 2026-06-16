@@ -176,6 +176,12 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
+    if not new_item:
+        return (
+            "Error: No new item was provided. "
+            "Run search_listings first to find a listing before asking for a suggested outfit."
+        )
+    
     client = _get_groq_client()
 
     item_summary = (

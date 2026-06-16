@@ -66,7 +66,8 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     outfit_suggestion = session["outfit_suggestion"]
     fit_card = session["fit_card"]
 
-    item_str = (
+    item_str = f"(result with {selected_item['omitted']} omitted)\n" if selected_item.get("omitted", False) else ""
+    item_str += (
         f"{selected_item['title']}\n"
         + f"available sizes: {selected_item['size']}, available colors: {selected_item['colors']}\n"
         + f"${selected_item['price']}, in {selected_item['condition']} condition\n"

@@ -163,7 +163,8 @@ def dispatch_tool(tool_name: str, tool_args: dict, session: dict) -> str:
             max_price=tool_args.get("max_price"),
         )
         session["search_results"] = listings
-        session["selected_item"] = listings[0] if listings else None
+        if listings:
+            session["selected_item"].update(listings[0])
         result = {"results": listings}
 
     elif tool_name == "suggest_outfit":
@@ -270,7 +271,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         {"role": "user", "content": query},
     ]
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    for rounds in range(MAX_TOOL_ROUNDS):
         for attempt in range(3):
             try:
                 response = client.chat.completions.create(
@@ -285,7 +286,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                 if e.status_code == 400 and attempt < 2:
                     print("[WARNING] model returned a 400 error, retrying...")
                     continue
-                raise
+                else:
+                    session["error"] = "LLM is having a stroke. Try again later or with another model."
+                    return session
         assistant_message = response.choices[0].message
         print(f"> assistant message: {assistant_message}")
 
@@ -313,6 +316,8 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
             if tool_name == "search_listings":
                 # Step 2: record what the LLM parsed from the query
+                omitted = set(session["parsed"].keys()) - set(tool_args.keys())
+                session["selected_item"] = {"omitted": omitted}
                 session["parsed"] = {k: v for k, v in tool_args.items()}
                 search_attempts += 1
                 tool_result = dispatch_tool(tool_name, tool_args, session)
@@ -325,8 +330,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                             "Try a broader description or remove size and price constraints."
                         )
                         return session
-                    # First failure: tell the LLM to retry with relaxed constraints
-                    omitted = [k for k in ("size", "max_price") if k not in tool_args]
+                    # tell the LLM to retry with relaxed constraints
                     tool_result = json.dumps({
                         "results": [],
                         "error": (
@@ -383,6 +387,8 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                 "content": tool_result,
             })
 
+    if rounds == MAX_TOOL_ROUNDS-1 and not session["fit_card"]:
+        session["error"] = "MAX_TOOL_ROUNDS reached. Try refining your query."
     return session
 
 
